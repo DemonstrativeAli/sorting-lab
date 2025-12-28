@@ -30,7 +30,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 border-top-right-radius: 8px;
                 margin-right: 4px;
             }
-            QTabBar::tab:selected { background: #2f70ff; color: #ffffff; }
+            QTabBar::tab:selected {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #2f70ff, stop:1 #3ac7ff);
+                color: #ffffff;
+            }
             """
         )
         self.setCentralWidget(tabs)
