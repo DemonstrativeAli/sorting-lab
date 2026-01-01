@@ -21,7 +21,22 @@ def sort(items: Sequence[T], *, record_steps: bool = False, step_limit: int = 40
     arr: List[T] = list(items)
     steps: list[list[T]] = []
 
+    def median_of_three(lo: int, mid: int, hi: int) -> int:
+        a, b, c = arr[lo], arr[mid], arr[hi]
+        if a <= b:
+            if b <= c:
+                return mid
+            return hi if a <= c else lo
+        if a <= c:
+            return lo
+        return hi if b <= c else mid
+
     def partition(lo: int, hi: int) -> int:
+        mid = (lo + hi) // 2
+        pivot_index = median_of_three(lo, mid, hi)
+        if pivot_index != hi:
+            arr[pivot_index], arr[hi] = arr[hi], arr[pivot_index]
+            _record_state(steps, arr, record_steps, step_limit)
         pivot = arr[hi]
         i = lo
         for j in range(lo, hi):
@@ -33,13 +48,19 @@ def sort(items: Sequence[T], *, record_steps: bool = False, step_limit: int = 40
         _record_state(steps, arr, record_steps, step_limit)
         return i
 
-    def quicksort(lo: int, hi: int) -> None:
-        if lo < hi:
+    # Iterative quicksort to avoid deep recursion (QThread stack overflow).
+    stack: list[tuple[int, int]] = [(0, len(arr) - 1)]
+    while stack:
+        lo, hi = stack.pop()
+        while lo < hi:
             p = partition(lo, hi)
-            quicksort(lo, p - 1)
-            quicksort(p + 1, hi)
-
-    quicksort(0, len(arr) - 1)
+            # Recurse on smaller partition, loop on larger to keep stack shallow.
+            if p - lo < hi - p:
+                stack.append((p + 1, hi))
+                hi = p - 1
+            else:
+                stack.append((lo, p - 1))
+                lo = p + 1
     return arr, steps
 
 

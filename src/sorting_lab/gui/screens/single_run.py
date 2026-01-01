@@ -18,6 +18,8 @@ class SingleRunView(QtWidgets.QWidget):
         self._build_header()
         self._build_body()
         self._build_footer()
+        self.layout().addStretch(1)
+        QtCore.QTimer.singleShot(0, self._sync_card_heights)
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(
@@ -88,8 +90,21 @@ class SingleRunView(QtWidgets.QWidget):
             QLabel#title { font-size: 18px; font-weight: 700; color: #f4f7ff; }
             QLabel#subtitle { color: #a8b8de; font-size: 12px; }
             QLabel#section-title { font-size: 13px; font-weight: 700; color: #d7e3ff; }
-            QLabel#chip-value { font-size: 14px; font-weight: 700; color: #f5f8ff; }
-            QLabel#chip-label { font-size: 10px; color: #9fb2d9; }
+            QLabel#chip-value { font-size: 12px; font-weight: 700; color: #f5f8ff; }
+            QLabel#chip-label { font-size: 9px; color: #9fb2d9; }
+            QLabel#status-pill {
+                background-color: #1a2440;
+                color: #d7e3ff;
+                padding: 2px 8px;
+                border-radius: 10px;
+                font-size: 10px;
+                min-width: 78px;
+                text-align: center;
+            }
+            QLabel#status-pill[state="running"] { background-color: #ffb347; color: #1a1a1a; }
+            QLabel#status-pill[state="done"] { background-color: #7effa1; color: #0b1a0f; }
+            QLabel#status-pill[state="ready"] { background-color: #2a3c63; color: #d7e3ff; }
+            QLabel#status-pill[state="error"] { background-color: #ff5b5b; color: #ffffff; }
             QHeaderView::section { background-color: #0f1629; color: #d8e4ff; border: none; padding: 4px; }
             """
         )
@@ -108,11 +123,15 @@ class SingleRunView(QtWidgets.QWidget):
         self.layout().addLayout(header)
 
     def _build_body(self) -> None:
-        body = QtWidgets.QHBoxLayout()
+        body_container = QtWidgets.QWidget()
+        body_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        body = QtWidgets.QHBoxLayout(body_container)
         body.setSpacing(12)
-        body.addWidget(self._build_form_card(), 1)
-        body.addWidget(self._build_result_card(), 2)
-        self.layout().addLayout(body)
+        self._form_card = self._build_form_card()
+        self._result_card = self._build_result_card()
+        body.addWidget(self._form_card, 1, QtCore.Qt.AlignTop)
+        body.addWidget(self._result_card, 2, QtCore.Qt.AlignTop)
+        self.layout().addWidget(body_container)
 
     def _build_form_card(self) -> QtWidgets.QFrame:
         card = self._card()
@@ -192,17 +211,23 @@ class SingleRunView(QtWidgets.QWidget):
     def _build_result_card(self) -> QtWidgets.QFrame:
         card = self._card()
         v = QtWidgets.QVBoxLayout(card)
+        v.setContentsMargins(10, 8, 10, 10)
+        v.setSpacing(6)
         header = QtWidgets.QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(10)
         title = QtWidgets.QLabel("Sonuçlar")
         title.setObjectName("title")
-        self.status_label = QtWidgets.QLabel("Hazır.")
-        self.status_label.setObjectName("subtitle")
+        self.status_label = QtWidgets.QLabel("Hazır")
+        self.status_label.setObjectName("status-pill")
+        self.status_label.setProperty("state", "ready")
         header.addWidget(title)
         header.addStretch()
         header.addWidget(self.status_label)
         v.addLayout(header)
 
         chip_row = QtWidgets.QHBoxLayout()
+        chip_row.setSpacing(8)
         self.dataset_value = self._stat_chip("Dataset", "-")
         self.size_value = self._stat_chip("Boyut", "-")
         self.runtime_value = self._stat_chip("Süre", "-")
@@ -211,8 +236,16 @@ class SingleRunView(QtWidgets.QWidget):
         chip_row.addWidget(self.size_value["frame"])
         chip_row.addWidget(self.runtime_value["frame"])
         chip_row.addWidget(self.memory_value["frame"])
-        chip_row.addStretch()
-        v.addLayout(chip_row)
+        chip_row.setStretch(0, 1)
+        chip_row.setStretch(1, 1)
+        chip_row.setStretch(2, 1)
+        chip_row.setStretch(3, 1)
+
+        chips_container = QtWidgets.QWidget()
+        chips_container.setLayout(chip_row)
+        chips_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        chips_container.setMaximumHeight(64)
+        v.addWidget(chips_container)
         self._chip_value_labels = [
             self.dataset_value["value"],
             self.size_value["value"],
@@ -234,7 +267,7 @@ class SingleRunView(QtWidgets.QWidget):
         self.preview_table.horizontalHeader().setStretchLastSection(True)
         self.preview_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.preview_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        self.preview_table.setMaximumHeight(240)
+        self.preview_table.setMaximumHeight(220)
         v.addWidget(self.preview_table)
         self.preview_help = QtWidgets.QLabel(
             "Giriş sütunu üretilen veri setinin ilk 20 elemanını gösterir. Sıralı sütunu, seçilen algoritmanın çıktısıdır."
@@ -248,6 +281,7 @@ class SingleRunView(QtWidgets.QWidget):
 
     def _card(self) -> QtWidgets.QFrame:
         card = QtWidgets.QFrame()
+        card.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Maximum)
         card.setObjectName("card")
         card.setGraphicsEffect(self._shadow_effect())
         return card
@@ -280,7 +314,7 @@ class SingleRunView(QtWidgets.QWidget):
         self.run_btn.setEnabled(False)
         self.progress.show()
         self.progress.setRange(0, 0)  # indeterminate
-        self.status_label.setText("Çalıştırılıyor...")
+        self._set_status("Çalıştırılıyor", "running")
         QtWidgets.QApplication.processEvents()
 
         base_data = data_gen.generate(dataset, size)
@@ -290,19 +324,20 @@ class SingleRunView(QtWidgets.QWidget):
         sorted_arr = result.output
         self._render_preview(base_data, sorted_arr)
         self.dataset_value["value"].setText(dataset)
-        self.size_value["value"].setText(str(size))
+        self.size_value["value"].setText(f"{size:,}")
         self.runtime_value["value"].setText(f"{result.duration:.4f} s")
         if result.memory_mb is not None:
             self.memory_value["value"].setText(f"{result.memory_mb:.3f} MB")
         else:
             self.memory_value["value"].setText("ölçülmedi")
-        self.status_label.setText("Tamamlandı.")
+        self._set_status("Tamamlandı", "done")
         self.progress.setRange(0, 1)
         self.progress.setValue(1)
         self.progress.hide()
         self.run_btn.setEnabled(True)
         self._fade_in(self._result_card)
         self._pulse_status()
+        self._animate_chips()
 
     def _render_preview(self, before: list[int], after: list[int]) -> None:
         max_rows = self.preview_table.rowCount()
@@ -377,18 +412,22 @@ class SingleRunView(QtWidgets.QWidget):
         self.algo_info_space.setText(info.get("space", ""))
         self.algo_info_use.setText(info.get("use", ""))
         self.algo_info_note.setText(info.get("note", ""))
+        self._sync_card_heights()
 
     def _stat_chip(self, label: str, value: str) -> dict[str, QtWidgets.QWidget]:
         frame = QtWidgets.QFrame()
         frame.setObjectName("chip")
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setContentsMargins(6, 4, 6, 4)
         value_label = QtWidgets.QLabel(value)
         value_label.setObjectName("chip-value")
         label_label = QtWidgets.QLabel(label)
         label_label.setObjectName("chip-label")
         layout.addWidget(value_label)
         layout.addWidget(label_label)
+        frame.setMinimumWidth(120)
+        frame.setMaximumHeight(60)
+        frame.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         return {"frame": frame, "value": value_label, "label": label_label}
 
     def _section_header(self, title: str) -> QtWidgets.QWidget:
@@ -417,6 +456,19 @@ class SingleRunView(QtWidgets.QWidget):
         anim.setEasingCurve(QtCore.QEasingCurve.InOutQuad)
         anim.start(QtCore.QAbstractAnimation.DeleteWhenStopped)
 
+    def _set_status(self, text: str, state: str) -> None:
+        self.status_label.setText(text)
+        self.status_label.setProperty("state", state)
+        self.status_label.style().polish(self.status_label)
+
+    def _sync_card_heights(self) -> None:
+        if not hasattr(self, "_form_card") or not hasattr(self, "_result_card"):
+            return
+        max_h = max(self._form_card.sizeHint().height(), self._result_card.sizeHint().height())
+        if max_h > 0:
+            self._form_card.setFixedHeight(max_h)
+            self._result_card.setFixedHeight(max_h)
+
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._apply_responsive_fonts()
@@ -424,9 +476,9 @@ class SingleRunView(QtWidgets.QWidget):
     def _apply_responsive_fonts(self) -> None:
         if not hasattr(self, "_chip_value_labels"):
             return
-        scale = max(0.8, min(1.05, self.width() / 1200))
-        value_size = int(14 * scale)
-        label_size = int(10 * scale)
+        scale = max(0.75, min(1.0, self.width() / 1400))
+        value_size = int(12 * scale)
+        label_size = int(9 * scale)
         for label in self._chip_value_labels:
             font = label.font()
             font.setPointSize(value_size)
@@ -435,3 +487,21 @@ class SingleRunView(QtWidgets.QWidget):
             font = label.font()
             font.setPointSize(label_size)
             label.setFont(font)
+    
+    def _animate_chips(self) -> None:
+        """Chip'leri sırayla animasyonlu göster"""
+        chips = [
+            self.dataset_value["frame"],
+            self.size_value["frame"],
+            self.runtime_value["frame"],
+            self.memory_value["frame"]
+        ]
+        for i, chip in enumerate(chips):
+            effect = QtWidgets.QGraphicsOpacityEffect()
+            chip.setGraphicsEffect(effect)
+            anim = QtCore.QPropertyAnimation(effect, b"opacity", chip)
+            anim.setDuration(300)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+            QtCore.QTimer.singleShot(i * 100, lambda a=anim: a.start(QtCore.QAbstractAnimation.DeleteWhenStopped))

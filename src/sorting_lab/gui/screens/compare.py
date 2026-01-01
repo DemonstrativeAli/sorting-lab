@@ -5,17 +5,83 @@ from __future__ import annotations
 from typing import List
 
 from PySide6 import QtWidgets, QtCore, QtGui
+import pandas as pd
+from statistics import mean, stdev
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.animation import FuncAnimation
 import matplotlib.pyplot as plt
+import numpy as np
 
-from sorting_lab.analysis.runner import run_experiments
 from sorting_lab import algorithms
+from sorting_lab.utils import data_gen, metrics
+
+
+class CompareWorker(QtCore.QObject):
+    finished = QtCore.Signal(object)
+    canceled = QtCore.Signal()
+    progress = QtCore.Signal(int, int, str)
+    error = QtCore.Signal(str)
+
+    def __init__(self, algos: list[str], size: int, dataset: str, runs: int) -> None:
+        super().__init__()
+        self.algos = list(algos)
+        self.size = size
+        self.dataset = dataset
+        self.runs = runs
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:
+        try:
+            records: list[dict[str, object]] = []
+            total = len(self.algos)
+            for idx, algo_key in enumerate(self.algos, start=1):
+                if self._stop:
+                    self.canceled.emit()
+                    return
+                base_data = data_gen.generate(self.dataset, self.size)
+                durations: list[float] = []
+                mems: list[float] = []
+                for _ in range(self.runs):
+                    if self._stop:
+                        self.canceled.emit()
+                        return
+                    result = metrics.measure(lambda: algorithms.run_algorithm(algo_key, base_data)[0])
+                    durations.append(result.duration)
+                    if result.memory_mb is not None:
+                        mems.append(result.memory_mb)
+                avg = mean(durations) if durations else 0.0
+                std = stdev(durations) if len(durations) > 1 else 0.0
+                memory = mean(mems) if mems else None
+                records.append(
+                    {
+                        "algorithm": algo_key,
+                        "dataset": self.dataset,
+                        "size": self.size,
+                        "runs": self.runs,
+                        "avg_time_s": avg,
+                        "std_time_s": std,
+                        "memory_mb": memory,
+                    }
+                )
+                self.progress.emit(idx, total, algo_key)
+            df = pd.DataFrame.from_records(records)
+            self.finished.emit(df)
+        except Exception as exc:  # pragma: no cover - UI error reporting
+            self.error.emit(str(exc))
 
 
 class CompareView(QtWidgets.QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._last_df = None
+        self._worker = None
+        self._thread = None
+        self._animation = None
+        self._chart_data = None
+        self._current_chart_index = 0
         self._apply_theme()
         self.setLayout(QtWidgets.QVBoxLayout())
         self.layout().setContentsMargins(10, 10, 10, 10)
@@ -65,6 +131,9 @@ class CompareView(QtWidgets.QWidget):
             QPushButton:hover { background-color: #ffa64a; transform: translateY(-1px); }
             QPushButton:pressed { background-color: #ff8f2f; }
             QPushButton:disabled { background-color: #3a4a71; color: #cfd9ff; }
+            QPushButton#stop-btn { background-color: #ff5b5b; color: #ffffff; }
+            QPushButton#stop-btn:hover { background-color: #ff7373; }
+            QPushButton#stop-btn:disabled { background-color: #663333; color: #f0bcbc; }
             QComboBox, QSpinBox, QListWidget {
                 background-color: #0f1527;
                 color: #eef3ff;
@@ -171,6 +240,10 @@ class CompareView(QtWidgets.QWidget):
 
         self.run_btn = QtWidgets.QPushButton("Karşılaştır")
         self.run_btn.clicked.connect(self._on_compare)
+        self.stop_btn = QtWidgets.QPushButton("Durdur")
+        self.stop_btn.setObjectName("stop-btn")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self._on_stop)
 
         self.progress = QtWidgets.QProgressBar()
         self.progress.setTextVisible(False)
@@ -189,6 +262,19 @@ class CompareView(QtWidgets.QWidget):
         info_layout.addWidget(self.algo_info_title)
         info_layout.addWidget(self.algo_info_desc)
 
+        self.case_info_card = QtWidgets.QFrame()
+        self.case_info_card.setObjectName("info-card")
+        case_layout = QtWidgets.QVBoxLayout(self.case_info_card)
+        case_layout.setContentsMargins(8, 8, 8, 8)
+        case_layout.setSpacing(6)
+        self.case_info_title = QtWidgets.QLabel("Best/Worst Senaryo")
+        self.case_info_title.setObjectName("section-title")
+        self.case_info_body = QtWidgets.QLabel("")
+        self.case_info_body.setWordWrap(True)
+        self.case_info_body.setObjectName("subtitle")
+        case_layout.addWidget(self.case_info_title)
+        case_layout.addWidget(self.case_info_body)
+
         hint = QtWidgets.QLabel("İpucu: Çoklu karşılaştırma için kutuları işaretleyin.")
         hint.setObjectName("subtitle")
         hint.setWordWrap(True)
@@ -196,11 +282,18 @@ class CompareView(QtWidgets.QWidget):
         form.addRow(self._section_header("Seçimler"))
         form.addRow("Algoritmalar:", self.algo_list)
         form.addRow("", self.algo_info_card)
+        form.addRow("", self.case_info_card)
         form.addRow("", hint)
         form.addRow("Veri seti:", self.dataset_combo)
         form.addRow("Boyut:", self.size_spin)
         form.addRow("Tekrar (runs):", self.runs_spin)
-        form.addRow("", self.run_btn)
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addWidget(self.run_btn)
+        btn_row.addWidget(self.stop_btn)
+        btn_row.addStretch()
+        btn_box = QtWidgets.QWidget()
+        btn_box.setLayout(btn_row)
+        form.addRow("", btn_box)
         form.addRow("", self.progress)
         self._update_algo_info(self.algo_list.currentItem())
         return card
@@ -219,12 +312,23 @@ class CompareView(QtWidgets.QWidget):
         header.addWidget(self.status_label)
         v.addLayout(header)
 
-        controls = QtWidgets.QHBoxLayout()
-        controls.addWidget(QtWidgets.QLabel("Grafik:"))
-        self.bar_btn = QtWidgets.QPushButton("Bar")
+        # Kontrol paneli - daha güzel görünüm için card içinde
+        controls_card = QtWidgets.QFrame()
+        controls_card.setObjectName("card")
+        controls_card.setMaximumHeight(80)
+        controls = QtWidgets.QHBoxLayout(controls_card)
+        controls.setContentsMargins(15, 10, 15, 10)
+        controls.setSpacing(15)
+        
+        # Grafik türü seçimi
+        type_label = QtWidgets.QLabel("Grafik Türü:")
+        type_label.setObjectName("section-title")
+        controls.addWidget(type_label)
+        
+        self.bar_btn = QtWidgets.QPushButton("📊 Bar")
         self.bar_btn.setObjectName("chart-toggle")
         self.bar_btn.setCheckable(True)
-        self.line_btn = QtWidgets.QPushButton("Line")
+        self.line_btn = QtWidgets.QPushButton("📈 Line")
         self.line_btn.setObjectName("chart-toggle")
         self.line_btn.setCheckable(True)
         self.bar_btn.setChecked(True)
@@ -233,11 +337,38 @@ class CompareView(QtWidgets.QWidget):
         self.line_btn.clicked.connect(lambda: self._set_chart_type("line"))
         controls.addWidget(self.bar_btn)
         controls.addWidget(self.line_btn)
-        self.reset_chart_btn = QtWidgets.QPushButton("Grafiği Sıfırla")
+        
+        # Ayırıcı
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.VLine)
+        separator.setFrameShadow(QtWidgets.QFrame.Sunken)
+        separator.setStyleSheet("color: #223156;")
+        controls.addWidget(separator)
+        
+        # Metrik seçimi
+        metric_label = QtWidgets.QLabel("Metrik:")
+        metric_label.setObjectName("section-title")
+        controls.addWidget(metric_label)
+        
+        self.chart_metric_combo = QtWidgets.QComboBox()
+        self.chart_metric_combo.addItems(["Zaman (Ortalama)", "Bellek Kullanımı", "Standart Sapma", "Süre Karşılaştırması"])
+        self.chart_metric_combo.currentIndexChanged.connect(self._on_metric_changed)
+        self.chart_metric_combo.setMinimumWidth(200)
+        controls.addWidget(self.chart_metric_combo)
+        
+        controls.addStretch()
+        
+        # Sıfırla butonu
+        self.reset_chart_btn = QtWidgets.QPushButton("🔄 Sıfırla")
         self.reset_chart_btn.clicked.connect(self._reset_chart)
         controls.addWidget(self.reset_chart_btn)
-        controls.addStretch()
-        v.addLayout(controls)
+        
+        self.reset_hint = QtWidgets.QLabel("")
+        self.reset_hint.setObjectName("subtitle")
+        self.reset_hint.setMinimumWidth(140)
+        controls.addWidget(self.reset_hint)
+        
+        v.addWidget(controls_card)
 
         self.table_toggle = QtWidgets.QToolButton()
         self.table_toggle.setObjectName("toggle-button")
@@ -267,13 +398,36 @@ class CompareView(QtWidgets.QWidget):
         table_layout.addWidget(toggle_bar)
         table_layout.addWidget(self.table)
 
-        self.canvas = FigureCanvasQTAgg(plt.Figure(figsize=(4, 3)))
-        self.canvas.setMinimumWidth(420)
+        # Ana grafik canvas - tek grafik, daha büyük
+        self.canvas = FigureCanvasQTAgg(plt.Figure(figsize=(8, 4.5)))
+        self.canvas.setMinimumWidth(600)
+        self.canvas.setMinimumHeight(350)
+        
+        # İkinci grafik canvas (detaylı karşılaştırma için) - alt kısımda
+        self.canvas2 = FigureCanvasQTAgg(plt.Figure(figsize=(8, 3.5)))
+        self.canvas2.setMinimumWidth(600)
+        self.canvas2.setMinimumHeight(280)
+        self.canvas2.figure.set_facecolor("#0c1324")
+        
+        # Grafik toggle butonu - başlangıçta açık
+        self.detail_chart_toggle = QtWidgets.QPushButton("▲ Detaylı Karşılaştırma Gizle")
+        self.detail_chart_toggle.setObjectName("chart-toggle")
+        self.detail_chart_toggle.setCheckable(True)
+        self.detail_chart_toggle.setChecked(True)  # Başlangıçta açık
+        self.detail_chart_toggle.toggled.connect(self._toggle_detail_chart)
+        
+        chart_container = QtWidgets.QVBoxLayout()
+        chart_container.setSpacing(10)
+        chart_container.addWidget(self.canvas, 1)
+        chart_container.addWidget(self.detail_chart_toggle)
+        chart_container.addWidget(self.canvas2, 1)
+        
         container = QtWidgets.QHBoxLayout()
+        container.setSpacing(12)
         container.addWidget(self.table_container, 2)
-        container.addWidget(self.canvas, 4)
+        container.addLayout(chart_container, 3)
         container.setStretch(0, 2)
-        container.setStretch(1, 4)
+        container.setStretch(1, 3)
         v.addLayout(container)
 
         self.summary_bar = QtWidgets.QFrame()
@@ -322,6 +476,8 @@ class CompareView(QtWidgets.QWidget):
         return keys
 
     def _on_compare(self) -> None:
+        if self._thread is not None and self._thread.isRunning():
+            return
         algos = self._selected_algorithms()
         if not algos:
             QtWidgets.QMessageBox.warning(self, "Uyarı", "En az bir algoritma seçin.")
@@ -331,22 +487,27 @@ class CompareView(QtWidgets.QWidget):
         runs = self.runs_spin.value()
 
         self.status_label.setText("Çalıştırılıyor...")
-        self.progress.setRange(0, 0)
+        self.progress.setRange(0, len(algos))
+        self.progress.setValue(0)
         self.progress.show()
         self.run_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
         QtWidgets.QApplication.processEvents()
 
-        df = run_experiments(algos, [size], dataset, runs=runs, save_path=None)
-        self._render_table(df)
-        self._render_chart(df)
-        self._update_summary(df)
-        self.status_label.setText("Tamamlandı.")
-        self.progress.setRange(0, 1)
-        self.progress.setValue(1)
-        self.progress.hide()
-        self.run_btn.setEnabled(True)
-        self._fade_in(self._result_card)
-        self._pulse_status()
+        self._worker = CompareWorker(algos, size, dataset, runs)
+        self._thread = QtCore.QThread(self)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.canceled.connect(self._on_worker_canceled)
+        self._worker.error.connect(self._on_worker_error)
+
+        for sig in (self._worker.finished, self._worker.canceled, self._worker.error):
+            sig.connect(self._thread.quit)
+            sig.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.start()
 
     def _pulse_status(self) -> None:
         effect = QtWidgets.QGraphicsOpacityEffect()
@@ -371,76 +532,501 @@ class CompareView(QtWidgets.QWidget):
         self.table.resizeColumnsToContents()
 
     def _render_chart(self, df) -> None:
-        self._last_df = df
-        ax = self.canvas.figure.subplots()
-        ax.clear()
-        self._apply_chart_style(ax)
-        colors = self._chart_colors(len(df))
-        y = list(df["avg_time_s"])
+        try:
+            self._last_df = df
+            self._stop_animation()
+            
+            # Önceki axes'leri tamamen temizle
+            self.canvas.figure.clear()
+            self.canvas2.figure.clear()
+            
+            # Ana grafik - yeni axes oluştur
+            ax = self.canvas.figure.add_subplot(111)
+            self._apply_chart_style(ax)
+            
+            # İkinci grafik (detaylı karşılaştırma) - her zaman göster
+            ax2 = self.canvas2.figure.add_subplot(111)
+            self._apply_chart_style(ax2)
+            
+            colors = self._chart_colors(len(df))
+            labels = list(df["algorithm"])
+            
+            # Metrik seçimine göre veri hazırla
+            metric = self.chart_metric_combo.currentText()
+            if metric == "Zaman (Ortalama)":
+                y = list(df["avg_time_s"])
+                ylabel = "Süre (s)"
+                title_suffix = "Ortalama Süre"
+            elif metric == "Bellek Kullanımı":
+                y = [m if m is not None else 0 for m in df["memory_mb"]]
+                ylabel = "Bellek (MB)"
+                title_suffix = "Bellek Kullanımı"
+            elif metric == "Standart Sapma":
+                y = list(df["std_time_s"])
+                ylabel = "Std Sapma (s)"
+                title_suffix = "Zaman Standart Sapması"
+            else:  # Süre Karşılaştırması
+                # Saniye cinsinden göster
+                y = list(df["avg_time_s"])
+                ylabel = "Süre (s)"
+                title_suffix = "Süre Karşılaştırması"
+            
+            # Ana grafik - animasyonlu
+            self._chart_data = {
+                "y": y,
+                "labels": labels,
+                "colors": colors,
+                "ylabel": ylabel,
+                "title": f"{self.dataset_combo.currentText()} / n={self.size_spin.value()} - {title_suffix}"
+            }
+            
+            # İkinci grafik - detaylı karşılaştırma (her zaman göster)
+            try:
+                self._render_comparison_chart(ax2, df)
+                self.canvas2.figure.set_facecolor("#0c1324")
+                self.canvas2.figure.tight_layout(pad=2.0)
+                self.canvas2.draw()
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "Uyarı", f"Detaylı grafik çizilirken hata: {str(e)}")
+            
+            self.canvas.figure.set_facecolor("#0c1324")
+            self.canvas.figure.tight_layout(pad=2.0)
+            self.canvas.draw()
+            
+            # Canvas2'yi her zaman göster ve layout'u güncelle
+            self.canvas2.setVisible(True)
+            self.canvas2.show()
+            self.detail_chart_toggle.setChecked(True)
+            self.detail_chart_toggle.setText("▲ Detaylı Karşılaştırma Gizle")
+            
+            # Animasyonu otomatik başlat
+            self._start_animation()
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Hata", f"Grafik çizilirken hata oluştu: {str(e)}")
+            self.status_label.setText(f"Hata: {str(e)}")
+
+    def _render_comparison_chart(self, ax, df) -> None:
+        """İkinci grafikte detaylı karşılaştırma göster"""
         labels = list(df["algorithm"])
+        x = np.arange(len(labels))
+        width = 0.25
+        
+        # Normalize edilmiş değerler (0-1 arası)
+        times = np.array(df["avg_time_s"])
+        times_norm = times / times.max() if times.max() > 0 else times
+        
+        memories = np.array([m if m is not None else 0 for m in df["memory_mb"]])
+        memories_norm = memories / memories.max() if memories.max() > 0 else memories
+        
+        stds = np.array(df["std_time_s"])
+        stds_norm = stds / stds.max() if stds.max() > 0 else stds
+        
+        colors = self._chart_colors(3)
+        ax.bar(x - width, times_norm, width, label="Zaman (norm)", color=colors[0], alpha=0.8)
+        ax.bar(x, memories_norm, width, label="Bellek (norm)", color=colors[1], alpha=0.8)
+        ax.bar(x + width, stds_norm, width, label="Std Sapma (norm)", color=colors[2], alpha=0.8)
+        
+        ax.set_ylabel("Normalize Değer", fontsize=11, color="#d8e4ff", fontweight='bold')
+        ax.set_title("Detaylı Performans Karşılaştırması", fontsize=12, color="#f4f7ff", pad=12, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=20, ha='right', fontsize=10)
+        ax.legend(loc='upper left', fontsize=9, framealpha=0.4, facecolor='#0c1324', edgecolor='#223156')
+        ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=1)
+        ax.grid(axis="x", alpha=0.1, linestyle="--", linewidth=0.5)
+        ax.set_ylim(0, 1.1)
+        # Arka plan rengini ayarla
+        ax.set_facecolor("#0c1324")
+
+    def _start_animation(self) -> None:
+        """Grafik animasyonunu başlat"""
+        try:
+            if self._chart_data is None:
+                return
+            
+            self._stop_animation()
+            
+            # Figure'ı temizle ve yeni axes oluştur
+            self.canvas.figure.clear()
+            ax = self.canvas.figure.add_subplot(111)
+            self._apply_chart_style(ax)
+            self.canvas.figure.set_facecolor("#0c1324")
+            
+            y = self._chart_data["y"]
+            labels = self._chart_data["labels"]
+            colors = self._chart_data["colors"]
+            ylabel = self._chart_data["ylabel"]
+            title = self._chart_data["title"]
+            
+            self._current_chart_index = 0
+            
+            if self.chart_type == "line":
+                x = list(range(len(y)))
+                self._line_data = {"x": x, "y": y, "colors": colors}
+                self._line_plot, = ax.plot([], [], color="#3ac7ff", linewidth=3, alpha=0.9, marker='o', markersize=8,
+                                          markerfacecolor='white', markeredgecolor="#3ac7ff", markeredgewidth=2)
+                self._line_scatter = ax.scatter([], [], c=[], s=120, zorder=4, edgecolors='white', linewidths=2.5, alpha=0.8)
+                self._line_fill_poly = None
+                ax.set_xticks(x)
+                ax.set_xticklabels(labels, rotation=20, ha='right', fontsize=10)
+                y_max = max(y) * 1.2 if y else 1
+                ax.set_ylim(0, y_max)
+                ax.set_xlim(-0.5, len(x) - 0.5)
+                ax.set_ylabel(ylabel, fontsize=12, color="#d8e4ff", fontweight='bold')
+                ax.set_title(title, fontsize=13, color="#f4f7ff", pad=15, fontweight='bold')
+                ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=1)
+                ax.grid(axis="x", alpha=0.1, linestyle="--", linewidth=0.5)
+                
+                def animate_line(frame):
+                    try:
+                        total_frames = len(x) * 3
+                        if frame >= total_frames:
+                            return self._line_plot, self._line_scatter
+                        progress = min(1.0, (frame + 1) / total_frames)
+                        idx = max(1, int(progress * len(x)))
+                        if idx > 0:
+                            x_data = x[:idx]
+                            y_data = y[:idx]
+                            self._line_plot.set_data(x_data, y_data)
+                            if len(x_data) > 0:
+                                scatter_data = np.array(list(zip(x_data, y_data)))
+                                self._line_scatter.set_offsets(scatter_data)
+                                if len(colors[:idx]) > 0:
+                                    # Renkleri normalize et
+                                    try:
+                                        color_array = np.linspace(0, 1, len(colors[:idx]))
+                                        self._line_scatter.set_array(color_array)
+                                        self._line_scatter.set_cmap(plt.cm.viridis)
+                                    except:
+                                        pass
+                                # Fill area - önceki fill'i kaldır
+                                if self._line_fill_poly is not None:
+                                    try:
+                                        for poly in self._line_fill_poly:
+                                            poly.remove()
+                                    except:
+                                        pass
+                                if len(x_data) > 1:
+                                    self._line_fill_poly = ax.fill_between(x_data, 0, y_data, color="#3ac7ff", alpha=0.2)
+                            # Eksenleri güncelle
+                            ax.set_ylabel(ylabel, fontsize=12, color="#d8e4ff", fontweight='bold')
+                            ax.set_title(title, fontsize=13, color="#f4f7ff", pad=15, fontweight='bold')
+                            ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=1)
+                            ax.grid(axis="x", alpha=0.1, linestyle="--", linewidth=0.5)
+                        self.canvas.draw_idle()
+                        return self._line_plot, self._line_scatter
+                    except Exception as e:
+                        # Hata olsa bile devam et
+                        return self._line_plot, self._line_scatter
+                
+                self._animation = FuncAnimation(
+                    self.canvas.figure, animate_line, frames=len(x) * 3, 
+                    interval=30, blit=False, repeat=False
+                )
+                # Figure arka plan rengini ayarla
+                self.canvas.figure.set_facecolor("#0c1324")
+            else:
+                self._bar_data = {"y": y, "labels": labels, "colors": colors}
+                self._bars = []
+                ax.set_xticks(range(len(labels)))
+                ax.set_xticklabels(labels, rotation=15, ha='right')
+                ax.set_ylim(0, max(y) * 1.15 if y else 1)
+                ax.set_xlim(-0.5, len(labels) - 0.5)
+                
+                def animate_bar(frame):
+                    try:
+                        total_frames = len(labels) * 15
+                        if frame >= total_frames:
+                            return self._bars
+                        
+                        # Her çubuk için ayrı animasyon
+                        ax.clear()
+                        self._apply_chart_style(ax)
+                        
+                        bars = []
+                        for i in range(len(labels)):
+                            # Her çubuk için animasyon ilerlemesi
+                            bar_start_frame = i * 12
+                            bar_anim_frames = 20
+                            if frame >= bar_start_frame:
+                                anim_progress = min(1.0, (frame - bar_start_frame) / bar_anim_frames)
+                                # Daha yumuşak easing function (ease-out cubic)
+                                anim_progress = 1 - (1 - anim_progress) ** 2.5
+                                target_height = y[i] * anim_progress
+                                bar = ax.bar(i, target_height, color=colors[i], alpha=0.85 + 0.1 * anim_progress, 
+                                            edgecolor='white', linewidth=2)
+                                bars.extend(bar)
+                                # Değer etiketi
+                                if anim_progress > 0.8:
+                                    ax.text(i, target_height, f'{y[i]:.4f}' if y[i] < 1 else f'{y[i]:.2f}',
+                                           ha='center', va='bottom', fontsize=10, color='#f4f7ff', weight='bold')
+                            else:
+                                bar = ax.bar(i, 0, color=colors[i], alpha=0.0)
+                                bars.extend(bar)
+                        
+                        ax.set_xticks(range(len(labels)))
+                        ax.set_xticklabels(labels, rotation=20, ha='right', fontsize=10)
+                        y_max = max(y) * 1.2 if y else 1
+                        ax.set_ylim(0, y_max)
+                        ax.set_xlim(-0.5, len(labels) - 0.5)
+                        ax.set_ylabel(ylabel, fontsize=12, color="#d8e4ff", fontweight='bold')
+                        ax.set_title(title, fontsize=13, color="#f4f7ff", pad=15, fontweight='bold')
+                        ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=1)
+                        ax.grid(axis="x", alpha=0.1, linestyle="--", linewidth=0.5)
+                        self._bars = bars
+                        self.canvas.draw_idle()
+                        return self._bars
+                    except Exception as e:
+                        # Hata olsa bile devam et
+                        return self._bars if hasattr(self, '_bars') else []
+                
+                self._animation = FuncAnimation(
+                    self.canvas.figure, animate_bar, frames=len(labels) * 15, 
+                    interval=25, blit=False, repeat=False
+                )
+                # Figure arka plan rengini ayarla
+                self.canvas.figure.set_facecolor("#0c1324")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Uyarı", f"Animasyon başlatılırken hata: {str(e)}")
+            # Hata olsa bile statik grafiği göster
+            try:
+                if self._chart_data is not None:
+                    self._render_static_chart()
+            except:
+                pass
+
+    def _stop_animation(self) -> None:
+        """Animasyonu durdur"""
+        try:
+            if self._animation is not None:
+                if hasattr(self._animation, 'event_source') and self._animation.event_source is not None:
+                    self._animation.event_source.stop()
+                self._animation = None
+        except Exception as e:
+            # Hata olsa bile devam et
+            self._animation = None
+
+
+    def _render_static_chart(self) -> None:
+        """Animasyon olmadan statik grafik göster"""
+        if self._last_df is None or self._chart_data is None:
+            return
+        
+        # Figure'ı temizle ve yeni axes oluştur
+        self.canvas.figure.clear()
+        ax = self.canvas.figure.add_subplot(111)
+        self._apply_chart_style(ax)
+        self.canvas.figure.set_facecolor("#0c1324")
+        
+        y = self._chart_data["y"]
+        labels = self._chart_data["labels"]
+        colors = self._chart_data["colors"]
+        ylabel = self._chart_data["ylabel"]
+        title = self._chart_data["title"]
+        
         if self.chart_type == "line":
             x = list(range(len(y)))
-            ax.plot(x, y, color="#3ac7ff", linewidth=2)
-            ax.scatter(x, y, c=colors, s=50, zorder=3)
+            ax.plot(x, y, color="#3ac7ff", linewidth=3, marker='o', markersize=10, alpha=0.9, 
+                   markerfacecolor='white', markeredgecolor="#3ac7ff", markeredgewidth=2)
+            ax.scatter(x, y, c=colors, s=120, zorder=4, edgecolors='white', linewidths=2.5, alpha=0.8)
+            ax.fill_between(x, 0, y, color="#3ac7ff", alpha=0.2)
             ax.set_xticks(x)
-            ax.set_xticklabels(labels)
-            ax.fill_between(x, y, color="#3ac7ff", alpha=0.08)
+            ax.set_xticklabels(labels, rotation=20, ha='right', fontsize=10)
+            # Y ekseni limiti
+            y_max = max(y) * 1.2 if y else 1
+            ax.set_ylim(0, y_max)
         else:
-            ax.bar(labels, y, color=colors)
-        ax.set_ylabel("Süre (s)")
-        ax.set_title(f"{self.dataset_combo.currentText()} / n={self.size_spin.value()}")
-        ax.grid(axis="y", alpha=0.2)
-        self.canvas.figure.tight_layout()
+            bars = ax.bar(labels, y, color=colors, alpha=0.9, edgecolor='white', linewidth=2)
+            # Değerleri çubukların üzerine yaz
+            for i, (bar, val) in enumerate(zip(bars, y)):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                       f'{val:.4f}' if val < 1 else f'{val:.2f}',
+                       ha='center', va='bottom', fontsize=10, color='#f4f7ff', weight='bold')
+            ax.set_xticklabels(labels, rotation=20, ha='right', fontsize=10)
+            # Y ekseni limiti
+            y_max = max(y) * 1.2 if y else 1
+            ax.set_ylim(0, y_max)
+        
+        ax.set_ylabel(ylabel, fontsize=12, color="#d8e4ff", fontweight='bold')
+        ax.set_title(title, fontsize=13, color="#f4f7ff", pad=15, fontweight='bold')
+        ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=1)
+        ax.grid(axis="x", alpha=0.1, linestyle="--", linewidth=0.5)
+        self.canvas.figure.set_facecolor("#0c1324")
+        self.canvas.figure.tight_layout(pad=2.0)
         self.canvas.draw()
+
+    def _on_metric_changed(self) -> None:
+        """Metrik değiştiğinde grafiği yeniden çiz"""
+        try:
+            if self._last_df is not None:
+                # Animasyonu durdur
+                self._stop_animation()
+                # Grafiği yeniden çiz (otomatik animasyon başlayacak)
+                self._render_chart(self._last_df)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Uyarı", f"Metrik değiştirilirken hata: {str(e)}")
+    
+    def _toggle_detail_chart(self, checked: bool) -> None:
+        """Detaylı karşılaştırma grafiğini göster/gizle"""
+        try:
+            if checked:
+                self.canvas2.show()
+                self.detail_chart_toggle.setText("▲ Detaylı Karşılaştırma Gizle")
+                # Eğer veri varsa grafiği yeniden çiz
+                if self._last_df is not None:
+                    self.canvas2.figure.clear()
+                    ax2 = self.canvas2.figure.add_subplot(111)
+                    self._apply_chart_style(ax2)
+                    self._render_comparison_chart(ax2, self._last_df)
+                    self.canvas2.figure.set_facecolor("#0c1324")
+                    self.canvas2.figure.tight_layout(pad=2.0)
+                    self.canvas2.draw()
+            else:
+                self.canvas2.hide()
+                self.detail_chart_toggle.setText("▼ Detaylı Karşılaştırma Göster")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Uyarı", f"Detaylı grafik gösterilirken hata: {str(e)}")
+
+    def _on_progress(self, current: int, total: int, algo_key: str) -> None:
+        self.status_label.setText(f"Çalıştırılıyor: {algo_key} ({current}/{total})")
+        self.progress.setValue(current)
+
+    def _on_worker_finished(self, df) -> None:
+        self._render_table(df)
+        self._render_chart(df)
+        self._update_summary(df)
+        self.status_label.setText("Tamamlandı.")
+        self._finish_run_ui()
+        self._fade_in(self._result_card)
+        self._pulse_status()
+        # Animasyon otomatik başlatılacak (_render_chart içinde)
+
+    def _on_worker_canceled(self) -> None:
+        self.status_label.setText("Durduruldu.")
+        self._finish_run_ui()
+
+    def _on_worker_error(self, message: str) -> None:
+        self.status_label.setText("Hata oluştu.")
+        QtWidgets.QMessageBox.critical(self, "Hata", message)
+        self._finish_run_ui()
+
+    def _finish_run_ui(self) -> None:
+        self.progress.hide()
+        self.run_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self._worker = None
+        self._thread = None
+
+    def _on_stop(self) -> None:
+        if self._worker is not None:
+            self._worker.stop()
+            self.status_label.setText("Durduruluyor...")
+            self.stop_btn.setEnabled(False)
 
     def _chart_colors(self, count: int) -> list[str]:
         palette = ["#3ac7ff", "#ffb347", "#7effa1", "#ff7a7a", "#b48bff", "#ffd166"]
         return [palette[i % len(palette)] for i in range(count)]
 
     def _apply_chart_style(self, ax) -> None:
-        self.canvas.figure.set_facecolor("#0c1324")
+        # Figure arka plan rengi - her zaman koyu tema
+        if hasattr(ax, 'figure'):
+            ax.figure.patch.set_facecolor("#0c1324")
+            ax.figure.set_facecolor("#0c1324")
+        ax.patch.set_facecolor("#0c1324")
         ax.set_facecolor("#0c1324")
-        ax.tick_params(axis="x", colors="#d8e4ff", labelsize=9)
-        ax.tick_params(axis="y", colors="#d8e4ff", labelsize=9)
+        ax.tick_params(axis="x", colors="#d8e4ff", labelsize=10)
+        ax.tick_params(axis="y", colors="#d8e4ff", labelsize=10)
         ax.yaxis.label.set_color("#d8e4ff")
+        ax.xaxis.label.set_color("#d8e4ff")
         ax.title.set_color("#f4f7ff")
         for spine in ax.spines.values():
             spine.set_color("#223156")
+            spine.set_linewidth(1.5)
 
     def _toggle_table(self, checked: bool) -> None:
         self.table.setVisible(checked)
         self.table_toggle.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
 
     def _set_chart_type(self, chart_type: str) -> None:
-        self.chart_type = chart_type
-        self.bar_btn.setChecked(chart_type == "bar")
-        self.line_btn.setChecked(chart_type == "line")
-        if self._last_df is not None:
-            self._render_chart(self._last_df)
+        try:
+            self.chart_type = chart_type
+            self.bar_btn.setChecked(chart_type == "bar")
+            self.line_btn.setChecked(chart_type == "line")
+            if self._last_df is not None:
+                # Animasyonu durdur
+                self._stop_animation()
+                # Grafiği yeniden çiz (otomatik animasyon başlayacak)
+                self._render_chart(self._last_df)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Uyarı", f"Grafik türü değiştirilirken hata: {str(e)}")
+    
+    def _cleanup_animation(self) -> None:
+        """Widget kapatılırken animasyonu temizle"""
+        self._stop_animation()
 
     def _reset_chart(self) -> None:
-        self._last_df = None
-        self.canvas.figure.clear()
-        ax = self.canvas.figure.subplots()
-        self._apply_chart_style(ax)
-        ax.set_title("Grafik sıfırlandı")
-        self.canvas.draw()
+        try:
+            self._stop_animation()
+            self._last_df = None
+            self._chart_data = None
+            self.canvas.figure.clear()
+            self.canvas2.figure.clear()
+            ax = self.canvas.figure.add_subplot(111)
+            self._apply_chart_style(ax)
+            if self.canvas2.isVisible():
+                ax2 = self.canvas2.figure.add_subplot(111)
+                self._apply_chart_style(ax2)
+            self.canvas.draw()
+            if self.canvas2.isVisible():
+                self.canvas2.draw()
+            self._show_reset_hint()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Uyarı", f"Grafik sıfırlanırken hata: {str(e)}")
+
+    def _show_reset_hint(self) -> None:
+        self.reset_hint.setText("Grafik sıfırlandı")
+        QtCore.QTimer.singleShot(5000, lambda: self.reset_hint.setText(""))
 
     def _update_algo_info(self, item: QtWidgets.QListWidgetItem | None) -> None:
         if item is None:
             self.algo_info_title.setText("")
             self.algo_info_desc.setText("")
+            self.case_info_body.setText("")
             return
         data = {
-            "quick": "Böl ve fethet; pivot etrafında bölme. Pratikte hızlı, worst O(n^2).",
-            "heap": "Heap tabanlı; O(n log n) ve in-place.",
-            "shell": "Aralıklı insertion; pratikte hızlı, teori aralığa bağlı.",
-            "merge": "Stabil ve O(n log n); ek bellek O(n).",
-            "radix": "Basamak bazlı; sayısal veride çok hızlı.",
+            "quick": {
+                "desc": "Böl ve fethet; pivot etrafında bölme. Pratikte hızlı, worst O(n^2).",
+                "best": "Best: O(n log n) - random/partial veri seti, dengeli pivot.",
+                "worst": "Worst: O(n^2) - reverse veya zaten sıralı veri (kötü pivot).",
+            },
+            "heap": {
+                "desc": "Heap tabanlı; O(n log n) ve in-place.",
+                "best": "Best: O(n log n) - veri setinden bağımsız.",
+                "worst": "Worst: O(n log n) - veri setinden bağımsız.",
+            },
+            "shell": {
+                "desc": "Aralıklı insertion; pratikte hızlı, teori aralığa bağlı.",
+                "best": "Best: kısmen sıralı (partial) veri, pratikte hızlı.",
+                "worst": "Worst: reverse veri, gap dizisine bağlı ~O(n^2).",
+            },
+            "merge": {
+                "desc": "Stabil ve O(n log n); ek bellek O(n).",
+                "best": "Best: O(n log n) - veri setinden bağımsız.",
+                "worst": "Worst: O(n log n) - veri setinden bağımsız.",
+            },
+            "radix": {
+                "desc": "Basamak bazlı; sayısal veride çok hızlı.",
+                "best": "Best: O(d*(n+k)) - basamak sayısı küçükse hızlı.",
+                "worst": "Worst: O(d*(n+k)) - basamak sayısı büyüdükçe artar.",
+            },
         }
         key = item.data(QtCore.Qt.UserRole)
+        info = data.get(key, {})
         self.algo_info_title.setText(item.text())
-        self.algo_info_desc.setText(data.get(key, ""))
+        self.algo_info_desc.setText(info.get("desc", ""))
+        best = info.get("best", "")
+        worst = info.get("worst", "")
+        self.case_info_body.setText(f"{best}\n{worst}".strip())
 
     def _on_algo_clicked(self, item: QtWidgets.QListWidgetItem) -> None:
         self._update_algo_info(item)
