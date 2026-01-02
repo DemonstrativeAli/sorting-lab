@@ -232,14 +232,17 @@ class SingleRunView(QtWidgets.QWidget):
         self.size_value = self._stat_chip("Boyut", "-")
         self.runtime_value = self._stat_chip("Süre", "-")
         self.memory_value = self._stat_chip("Bellek Δ", "-")
+        self.memory_peak_value = self._stat_chip("Bellek Peak", "-")
         chip_row.addWidget(self.dataset_value["frame"])
         chip_row.addWidget(self.size_value["frame"])
         chip_row.addWidget(self.runtime_value["frame"])
         chip_row.addWidget(self.memory_value["frame"])
+        chip_row.addWidget(self.memory_peak_value["frame"])
         chip_row.setStretch(0, 1)
         chip_row.setStretch(1, 1)
         chip_row.setStretch(2, 1)
         chip_row.setStretch(3, 1)
+        chip_row.setStretch(4, 1)
 
         chips_container = QtWidgets.QWidget()
         chips_container.setLayout(chip_row)
@@ -251,12 +254,14 @@ class SingleRunView(QtWidgets.QWidget):
             self.size_value["value"],
             self.runtime_value["value"],
             self.memory_value["value"],
+            self.memory_peak_value["value"],
         ]
         self._chip_text_labels = [
             self.dataset_value["label"],
             self.size_value["label"],
             self.runtime_value["label"],
             self.memory_value["label"],
+            self.memory_peak_value["label"],
         ]
         self._apply_responsive_fonts()
 
@@ -330,6 +335,10 @@ class SingleRunView(QtWidgets.QWidget):
             self.memory_value["value"].setText(f"{result.memory_mb:.3f} MB")
         else:
             self.memory_value["value"].setText("ölçülmedi")
+        if result.memory_peak_mb is not None:
+            self.memory_peak_value["value"].setText(f"{result.memory_peak_mb:.3f} MB")
+        else:
+            self.memory_peak_value["value"].setText("ölçülmedi")
         self._set_status("Tamamlandı", "done")
         self.progress.setRange(0, 1)
         self.progress.setValue(1)
@@ -494,7 +503,8 @@ class SingleRunView(QtWidgets.QWidget):
             self.dataset_value["frame"],
             self.size_value["frame"],
             self.runtime_value["frame"],
-            self.memory_value["frame"]
+            self.memory_value["frame"],
+            self.memory_peak_value["frame"],
         ]
         for i, chip in enumerate(chips):
             effect = QtWidgets.QGraphicsOpacityEffect()

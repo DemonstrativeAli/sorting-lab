@@ -5,9 +5,11 @@ from __future__ import annotations
 import sys
 from PySide6 import QtWidgets
 
+from sorting_lab.gui.screens.chatbot import ChatbotView
 from sorting_lab.gui.screens.compare import CompareView
 from sorting_lab.gui.screens.live_view import LiveView
 from sorting_lab.gui.screens.single_run import SingleRunView
+from sorting_lab.utils.env import load_env
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -19,6 +21,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tabs.addTab(SingleRunView(), "Çalıştırma")
         tabs.addTab(CompareView(), "Karşılaştırma")
         tabs.addTab(LiveView(), "Adım Adım")
+        tabs.addTab(ChatbotView(), "Chatbot")
         tabs.setStyleSheet(
             """
             QTabWidget::pane { border: 1px solid #223156; background: #0b1222; }
@@ -41,6 +44,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def run() -> int:
+    load_env()
     app = QtWidgets.QApplication(sys.argv)
     window = MainWindow()
     window.show()

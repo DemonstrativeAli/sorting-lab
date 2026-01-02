@@ -9,7 +9,10 @@ import pandas as pd
 def generate_report(results_path: str, output_path: str) -> None:
     """Create a lightweight HTML report from a CSV results file."""
     df = pd.read_csv(results_path)
-    summary = df.groupby("algorithm").agg({"avg_time_s": "mean", "memory_mb": "mean"}).reset_index()
+    summary_fields = {"avg_time_s": "mean", "memory_mb": "mean"}
+    if "memory_peak_mb" in df.columns:
+        summary_fields["memory_peak_mb"] = "mean"
+    summary = df.groupby("algorithm").agg(summary_fields).reset_index()
 
     html = f"""
     <html>

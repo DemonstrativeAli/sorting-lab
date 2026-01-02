@@ -82,6 +82,7 @@ class LiveView(QtWidgets.QWidget):
         self.steps: list[list[int]] = []
         self.step_idx = 0
         self.timer = QtCore.QTimer(self)
+        self.timer.setTimerType(QtCore.Qt.PreciseTimer)
         self.timer.timeout.connect(self._advance)
         self._apply_theme()
         self._build_ui()
@@ -186,9 +187,9 @@ class LiveView(QtWidgets.QWidget):
         self.size_spin.setSingleStep(50)
 
         self.speed_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.speed_slider.setRange(5, 200)
-        self.speed_slider.setValue(30)
-        self.speed_slider.setToolTip("Kareler arası ms (düşük = hızlı)")
+        self.speed_slider.setRange(10, 60)
+        self.speed_slider.setValue(60)
+        self.speed_slider.setToolTip("FPS (yüksek = daha akıcı)")
 
         btn_row = QtWidgets.QHBoxLayout()
         self.run_btn = QtWidgets.QPushButton("▶ Başlat")
@@ -204,7 +205,7 @@ class LiveView(QtWidgets.QWidget):
         controls.addRow("Algoritma:", self.algo_combo)
         controls.addRow("Veri seti:", self.dataset_combo)
         controls.addRow("Boyut:", self.size_spin)
-        controls.addRow("Hız (ms):", self.speed_slider)
+        controls.addRow("Hız (FPS):", self.speed_slider)
         controls.addRow("", QtWidgets.QWidget())
         btn_widget = QtWidgets.QWidget()
         btn_widget.setLayout(btn_row)
@@ -259,9 +260,10 @@ class LiveView(QtWidgets.QWidget):
         self.progress.setRange(0, len(self.steps) - 1)
         self.progress.setValue(0)
 
-        interval_ms = max(5, self.speed_slider.value())
+        fps = max(1, self.speed_slider.value())
+        interval_ms = max(1, int(1000 / fps))
         self.timer.start(interval_ms)
-        self.status.setText(f"▶ Oynatılıyor: {len(self.steps)} adım | Hız: {interval_ms}ms/adım")
+        self.status.setText(f"▶ Oynatılıyor: {len(self.steps)} adım | Hız: {fps} FPS")
 
     def _on_stop(self) -> None:
         self.timer.stop()

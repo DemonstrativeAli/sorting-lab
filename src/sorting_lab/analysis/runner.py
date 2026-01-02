@@ -33,6 +33,7 @@ def run_experiments(
                     "avg_time_s": trial_stats.avg,
                     "std_time_s": trial_stats.std,
                     "memory_mb": trial_stats.memory_mb,
+                    "memory_peak_mb": trial_stats.memory_peak_mb,
                 }
             )
 

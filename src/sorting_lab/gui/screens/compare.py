@@ -44,6 +44,7 @@ class CompareWorker(QtCore.QObject):
                 base_data = data_gen.generate(self.dataset, self.size)
                 durations: list[float] = []
                 mems: list[float] = []
+                mem_peaks: list[float] = []
                 for _ in range(self.runs):
                     if self._stop:
                         self.canceled.emit()
@@ -52,9 +53,12 @@ class CompareWorker(QtCore.QObject):
                     durations.append(result.duration)
                     if result.memory_mb is not None:
                         mems.append(result.memory_mb)
+                    if result.memory_peak_mb is not None:
+                        mem_peaks.append(result.memory_peak_mb)
                 avg = mean(durations) if durations else 0.0
                 std = stdev(durations) if len(durations) > 1 else 0.0
                 memory = mean(mems) if mems else None
+                memory_peak = mean(mem_peaks) if mem_peaks else None
                 records.append(
                     {
                         "algorithm": algo_key,
@@ -64,6 +68,7 @@ class CompareWorker(QtCore.QObject):
                         "avg_time_s": avg,
                         "std_time_s": std,
                         "memory_mb": memory,
+                        "memory_peak_mb": memory_peak,
                     }
                 )
                 self.progress.emit(idx, total, algo_key)
@@ -82,6 +87,7 @@ class CompareView(QtWidgets.QWidget):
         self._animation = None
         self._chart_data = None
         self._current_chart_index = 0
+        self._animation_interval_ms = 16
         self._apply_theme()
         self.setLayout(QtWidgets.QVBoxLayout())
         self.layout().setContentsMargins(10, 10, 10, 10)
@@ -351,7 +357,9 @@ class CompareView(QtWidgets.QWidget):
         controls.addWidget(metric_label)
         
         self.chart_metric_combo = QtWidgets.QComboBox()
-        self.chart_metric_combo.addItems(["Zaman (Ortalama)", "Bellek Kullanımı", "Standart Sapma", "Süre Karşılaştırması"])
+        self.chart_metric_combo.addItems(
+            ["Zaman (Ortalama)", "Bellek (Ek)", "Bellek (Toplam Peak)", "Standart Sapma", "Süre Karşılaştırması"]
+        )
         self.chart_metric_combo.currentIndexChanged.connect(self._on_metric_changed)
         self.chart_metric_combo.setMinimumWidth(200)
         controls.addWidget(self.chart_metric_combo)
@@ -385,8 +393,10 @@ class CompareView(QtWidgets.QWidget):
         toggle_layout.addWidget(self.table_toggle)
         toggle_layout.addStretch()
 
-        self.table = QtWidgets.QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Algoritma", "Dataset", "N", "Ortalama (s)", "Std (s)", "Bellek Δ (MB)"])
+        self.table = QtWidgets.QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            ["Algoritma", "Dataset", "N", "Ortalama (s)", "Std (s)", "Bellek Δ (MB)", "Bellek Peak (MB)"]
+        )
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setMinimumHeight(220)
         self.table.setStyleSheet("QTableWidget { background-color: #0c1324; }")
@@ -402,12 +412,13 @@ class CompareView(QtWidgets.QWidget):
         self.canvas = FigureCanvasQTAgg(plt.Figure(figsize=(8, 4.5)))
         self.canvas.setMinimumWidth(600)
         self.canvas.setMinimumHeight(350)
+        self._prime_canvas(self.canvas)
         
         # İkinci grafik canvas (detaylı karşılaştırma için) - alt kısımda
         self.canvas2 = FigureCanvasQTAgg(plt.Figure(figsize=(8, 3.5)))
         self.canvas2.setMinimumWidth(600)
         self.canvas2.setMinimumHeight(280)
-        self.canvas2.figure.set_facecolor("#0c1324")
+        self._prime_canvas(self.canvas2)
         
         # Grafik toggle butonu - başlangıçta açık
         self.detail_chart_toggle = QtWidgets.QPushButton("▲ Detaylı Karşılaştırma Gizle")
@@ -529,6 +540,8 @@ class CompareView(QtWidgets.QWidget):
             self.table.setItem(row, 4, QtWidgets.QTableWidgetItem(f"{r['std_time_s']:.4f}"))
             mem = "-" if r["memory_mb"] is None else f"{r['memory_mb']:.3f}"
             self.table.setItem(row, 5, QtWidgets.QTableWidgetItem(mem))
+            mem_peak = "-" if r.get("memory_peak_mb") is None else f"{r['memory_peak_mb']:.3f}"
+            self.table.setItem(row, 6, QtWidgets.QTableWidgetItem(mem_peak))
         self.table.resizeColumnsToContents()
 
     def _render_chart(self, df) -> None:
@@ -550,6 +563,7 @@ class CompareView(QtWidgets.QWidget):
             
             colors = self._chart_colors(len(df))
             labels = list(df["algorithm"])
+            title_prefix = f"{self.dataset_combo.currentText()} / n={self.size_spin.value()}"
             
             # Metrik seçimine göre veri hazırla
             metric = self.chart_metric_combo.currentText()
@@ -557,19 +571,24 @@ class CompareView(QtWidgets.QWidget):
                 y = list(df["avg_time_s"])
                 ylabel = "Süre (s)"
                 title_suffix = "Ortalama Süre"
-            elif metric == "Bellek Kullanımı":
-                y = [m if m is not None else 0 for m in df["memory_mb"]]
-                ylabel = "Bellek (MB)"
-                title_suffix = "Bellek Kullanımı"
+                secondary_info = None
+            elif (memory_config := self._memory_metric_config(metric)) is not None:
+                primary_key, primary_title, primary_ylabel, secondary_key, secondary_title, secondary_ylabel = memory_config
+                y = self._memory_values(df, primary_key)
+                ylabel = primary_ylabel
+                title_suffix = primary_title
+                secondary_info = (secondary_key, secondary_title, secondary_ylabel)
             elif metric == "Standart Sapma":
                 y = list(df["std_time_s"])
                 ylabel = "Std Sapma (s)"
                 title_suffix = "Zaman Standart Sapması"
+                secondary_info = None
             else:  # Süre Karşılaştırması
                 # Saniye cinsinden göster
                 y = list(df["avg_time_s"])
                 ylabel = "Süre (s)"
                 title_suffix = "Süre Karşılaştırması"
+                secondary_info = None
             
             # Ana grafik - animasyonlu
             self._chart_data = {
@@ -577,12 +596,16 @@ class CompareView(QtWidgets.QWidget):
                 "labels": labels,
                 "colors": colors,
                 "ylabel": ylabel,
-                "title": f"{self.dataset_combo.currentText()} / n={self.size_spin.value()} - {title_suffix}"
+                "title": f"{title_prefix} - {title_suffix}"
             }
             
             # İkinci grafik - detaylı karşılaştırma (her zaman göster)
             try:
-                self._render_comparison_chart(ax2, df)
+                if secondary_info:
+                    sec_key, sec_title, sec_ylabel = secondary_info
+                    self._render_memory_chart(ax2, df, sec_key, f"{title_prefix} - {sec_title}", sec_ylabel)
+                else:
+                    self._render_comparison_chart(ax2, df)
                 self.canvas2.figure.set_facecolor("#0c1324")
                 self.canvas2.figure.tight_layout(pad=2.0)
                 self.canvas2.draw()
@@ -597,7 +620,9 @@ class CompareView(QtWidgets.QWidget):
             self.canvas2.setVisible(True)
             self.canvas2.show()
             self.detail_chart_toggle.setChecked(True)
-            self.detail_chart_toggle.setText("▲ Detaylı Karşılaştırma Gizle")
+            self.detail_chart_toggle.setText(
+                "▲ İkinci Bellek Grafiğini Gizle" if secondary_info else "▲ Detaylı Karşılaştırma Gizle"
+            )
             
             # Animasyonu otomatik başlat
             self._start_animation()
@@ -615,7 +640,7 @@ class CompareView(QtWidgets.QWidget):
         times = np.array(df["avg_time_s"])
         times_norm = times / times.max() if times.max() > 0 else times
         
-        memories = np.array([m if m is not None else 0 for m in df["memory_mb"]])
+        memories = np.array(self._memory_values(df, "memory_mb"))
         memories_norm = memories / memories.max() if memories.max() > 0 else memories
         
         stds = np.array(df["std_time_s"])
@@ -623,7 +648,7 @@ class CompareView(QtWidgets.QWidget):
         
         colors = self._chart_colors(3)
         ax.bar(x - width, times_norm, width, label="Zaman (norm)", color=colors[0], alpha=0.8)
-        ax.bar(x, memories_norm, width, label="Bellek (norm)", color=colors[1], alpha=0.8)
+        ax.bar(x, memories_norm, width, label="Bellek Δ (norm)", color=colors[1], alpha=0.8)
         ax.bar(x + width, stds_norm, width, label="Std Sapma (norm)", color=colors[2], alpha=0.8)
         
         ax.set_ylabel("Normalize Değer", fontsize=11, color="#d8e4ff", fontweight='bold')
@@ -668,7 +693,8 @@ class CompareView(QtWidgets.QWidget):
                 self._line_fill_poly = None
                 ax.set_xticks(x)
                 ax.set_xticklabels(labels, rotation=20, ha='right', fontsize=10)
-                y_max = max(y) * 1.2 if y else 1
+                y_max = max(y) if y else 0
+                y_max = y_max * 1.2 if y_max > 0 else 1
                 ax.set_ylim(0, y_max)
                 ax.set_xlim(-0.5, len(x) - 0.5)
                 ax.set_ylabel(ylabel, fontsize=12, color="#d8e4ff", fontweight='bold')
@@ -720,7 +746,7 @@ class CompareView(QtWidgets.QWidget):
                 
                 self._animation = FuncAnimation(
                     self.canvas.figure, animate_line, frames=len(x) * 3, 
-                    interval=30, blit=False, repeat=False
+                    interval=self._animation_interval_ms, blit=False, repeat=False
                 )
                 # Figure arka plan rengini ayarla
                 self.canvas.figure.set_facecolor("#0c1324")
@@ -729,7 +755,9 @@ class CompareView(QtWidgets.QWidget):
                 self._bars = []
                 ax.set_xticks(range(len(labels)))
                 ax.set_xticklabels(labels, rotation=15, ha='right')
-                ax.set_ylim(0, max(y) * 1.15 if y else 1)
+                y_max = max(y) if y else 0
+                y_max = y_max * 1.15 if y_max > 0 else 1
+                ax.set_ylim(0, y_max)
                 ax.set_xlim(-0.5, len(labels) - 0.5)
                 
                 def animate_bar(frame):
@@ -765,7 +793,8 @@ class CompareView(QtWidgets.QWidget):
                         
                         ax.set_xticks(range(len(labels)))
                         ax.set_xticklabels(labels, rotation=20, ha='right', fontsize=10)
-                        y_max = max(y) * 1.2 if y else 1
+                        y_max = max(y) if y else 0
+                        y_max = y_max * 1.2 if y_max > 0 else 1
                         ax.set_ylim(0, y_max)
                         ax.set_xlim(-0.5, len(labels) - 0.5)
                         ax.set_ylabel(ylabel, fontsize=12, color="#d8e4ff", fontweight='bold')
@@ -781,10 +810,11 @@ class CompareView(QtWidgets.QWidget):
                 
                 self._animation = FuncAnimation(
                     self.canvas.figure, animate_bar, frames=len(labels) * 15, 
-                    interval=25, blit=False, repeat=False
+                    interval=self._animation_interval_ms, blit=False, repeat=False
                 )
                 # Figure arka plan rengini ayarla
                 self.canvas.figure.set_facecolor("#0c1324")
+            self.canvas.draw_idle()
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Uyarı", f"Animasyon başlatılırken hata: {str(e)}")
             # Hata olsa bile statik grafiği göster
@@ -832,7 +862,8 @@ class CompareView(QtWidgets.QWidget):
             ax.set_xticks(x)
             ax.set_xticklabels(labels, rotation=20, ha='right', fontsize=10)
             # Y ekseni limiti
-            y_max = max(y) * 1.2 if y else 1
+            y_max = max(y) if y else 0
+            y_max = y_max * 1.2 if y_max > 0 else 1
             ax.set_ylim(0, y_max)
         else:
             bars = ax.bar(labels, y, color=colors, alpha=0.9, edgecolor='white', linewidth=2)
@@ -844,7 +875,8 @@ class CompareView(QtWidgets.QWidget):
                        ha='center', va='bottom', fontsize=10, color='#f4f7ff', weight='bold')
             ax.set_xticklabels(labels, rotation=20, ha='right', fontsize=10)
             # Y ekseni limiti
-            y_max = max(y) * 1.2 if y else 1
+            y_max = max(y) if y else 0
+            y_max = y_max * 1.2 if y_max > 0 else 1
             ax.set_ylim(0, y_max)
         
         ax.set_ylabel(ylabel, fontsize=12, color="#d8e4ff", fontweight='bold')
@@ -869,21 +901,32 @@ class CompareView(QtWidgets.QWidget):
     def _toggle_detail_chart(self, checked: bool) -> None:
         """Detaylı karşılaştırma grafiğini göster/gizle"""
         try:
+            metric = self.chart_metric_combo.currentText()
+            memory_config = self._memory_metric_config(metric)
+            title_prefix = f"{self.dataset_combo.currentText()} / n={self.size_spin.value()}"
             if checked:
                 self.canvas2.show()
-                self.detail_chart_toggle.setText("▲ Detaylı Karşılaştırma Gizle")
+                self.detail_chart_toggle.setText(
+                    "▲ İkinci Bellek Grafiğini Gizle" if memory_config else "▲ Detaylı Karşılaştırma Gizle"
+                )
                 # Eğer veri varsa grafiği yeniden çiz
                 if self._last_df is not None:
                     self.canvas2.figure.clear()
                     ax2 = self.canvas2.figure.add_subplot(111)
                     self._apply_chart_style(ax2)
-                    self._render_comparison_chart(ax2, self._last_df)
+                    if memory_config:
+                        sec_key, sec_title, sec_ylabel = memory_config[3], memory_config[4], memory_config[5]
+                        self._render_memory_chart(ax2, self._last_df, sec_key, f"{title_prefix} - {sec_title}", sec_ylabel)
+                    else:
+                        self._render_comparison_chart(ax2, self._last_df)
                     self.canvas2.figure.set_facecolor("#0c1324")
                     self.canvas2.figure.tight_layout(pad=2.0)
                     self.canvas2.draw()
             else:
                 self.canvas2.hide()
-                self.detail_chart_toggle.setText("▼ Detaylı Karşılaştırma Göster")
+                self.detail_chart_toggle.setText(
+                    "▼ İkinci Bellek Grafiğini Göster" if memory_config else "▼ Detaylı Karşılaştırma Göster"
+                )
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Uyarı", f"Detaylı grafik gösterilirken hata: {str(e)}")
 
@@ -926,6 +969,67 @@ class CompareView(QtWidgets.QWidget):
     def _chart_colors(self, count: int) -> list[str]:
         palette = ["#3ac7ff", "#ffb347", "#7effa1", "#ff7a7a", "#b48bff", "#ffd166"]
         return [palette[i % len(palette)] for i in range(count)]
+
+    def _memory_metric_config(self, metric: str) -> tuple[str, str, str, str, str, str] | None:
+        if metric == "Bellek (Ek)":
+            return (
+                "memory_mb",
+                "Ek Bellek (Peak Δ)",
+                "Bellek Δ (MB)",
+                "memory_peak_mb",
+                "Toplam Bellek (Peak)",
+                "Bellek Peak (MB)",
+            )
+        if metric == "Bellek (Toplam Peak)":
+            return (
+                "memory_peak_mb",
+                "Toplam Bellek (Peak)",
+                "Bellek Peak (MB)",
+                "memory_mb",
+                "Ek Bellek (Peak Δ)",
+                "Bellek Δ (MB)",
+            )
+        return None
+
+    def _memory_values(self, df, key: str) -> list[float]:
+        if key not in df.columns:
+            return [0.0] * len(df)
+        values: list[float] = []
+        for val in df[key]:
+            if val is None:
+                values.append(0.0)
+            else:
+                values.append(max(0.0, float(val)))
+        return values
+
+    def _render_memory_chart(self, ax, df, key: str, title: str, ylabel: str) -> None:
+        labels = list(df["algorithm"])
+        y = self._memory_values(df, key)
+        colors = self._chart_colors(len(labels))
+        x = np.arange(len(labels))
+        ax.bar(x, y, color=colors, alpha=0.9, edgecolor="white", linewidth=1.8)
+        y_max = max(y) if y else 0
+        y_max = y_max * 1.2 if y_max > 0 else 1
+        ax.set_ylim(0, y_max)
+        ax.set_ylabel(ylabel, fontsize=12, color="#d8e4ff", fontweight="bold")
+        ax.set_title(title, fontsize=13, color="#f4f7ff", pad=14, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=10)
+        ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=1)
+        ax.grid(axis="x", alpha=0.1, linestyle="--", linewidth=0.5)
+        ax.set_facecolor("#0c1324")
+
+    def _prime_canvas(self, canvas: FigureCanvasQTAgg) -> None:
+        fig = canvas.figure
+        fig.set_facecolor("#0c1324")
+        fig.patch.set_facecolor("#0c1324")
+        fig.clear()
+        ax = fig.add_subplot(111)
+        self._apply_chart_style(ax)
+        ax.set_axis_off()
+        fig.tight_layout(pad=2.0)
+        canvas.setStyleSheet("background-color: #0c1324;")
+        canvas.draw_idle()
 
     def _apply_chart_style(self, ax) -> None:
         # Figure arka plan rengi - her zaman koyu tema
