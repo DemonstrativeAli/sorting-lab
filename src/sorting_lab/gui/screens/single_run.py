@@ -1,5 +1,3 @@
-"""Single algorithm run screen with styled layout and subtle animation."""
-
 from __future__ import annotations
 
 from PySide6 import QtCore, QtGui, QtWidgets

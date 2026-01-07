@@ -20,9 +20,11 @@ def run_experiments(
 ) -> pd.DataFrame:
     """Run benchmarks across algorithms and sizes, optionally persisting results."""
     records: list[dict[str, object]] = []
-    for algo_key in algorithms_keys:
-        for size in sizes:
-            base_data = data_gen.generate(dataset, size)
+    algo_list = list(algorithms_keys)
+    size_list = list(sizes)
+    for size in size_list:
+        base_data = data_gen.generate(dataset, size)
+        for algo_key in algo_list:
             trial_stats = metrics.run_trials(lambda: algorithms.run_algorithm(algo_key, base_data)[0], runs=runs)
             records.append(
                 {

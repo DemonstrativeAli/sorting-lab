@@ -2,7 +2,7 @@
 
 ## Veri Setleri
 - random: `data_gen.random_array(n)`
-- partial: %30-50 sıralı blok + rastgele karışım
+- partial: sıralı dizi + belirli oranda karıştırma (varsayılan %50)
 - reverse: tamamen ters sıralı
 
 ## Boyutlar
@@ -15,7 +15,7 @@
 
 ## Ölçüm
 - Zaman: `time.perf_counter` ortalaması
-- Bellek: `memory_profiler.memory_usage` veya `psutil.Process().memory_info()` farkı
+- Bellek: `tracemalloc` peak delta + `psutil` RSS peak
 
 ## Komut (örn.)
 ```bash

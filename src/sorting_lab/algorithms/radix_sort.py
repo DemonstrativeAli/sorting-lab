@@ -1,5 +1,3 @@
-"""Radix Sort implementation with optional step capture (non-negative integers)."""
-
 from __future__ import annotations
 
 from typing import List, Sequence

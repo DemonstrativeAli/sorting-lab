@@ -1,5 +1,3 @@
-"""Heap Sort implementation with optional step capture."""
-
 from __future__ import annotations
 
 from typing import List, MutableSequence, Sequence, TypeVar

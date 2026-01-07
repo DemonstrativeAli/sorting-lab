@@ -17,12 +17,24 @@ def partially_sorted_array(n: int, sorted_ratio: float = 0.5, seed: int | None =
     """Generate a partially sorted array; sorted_ratio in [0,1]."""
     if seed is not None:
         random.seed(seed)
-    k = max(1, int(n * sorted_ratio))
-    sorted_part = list(range(k))
-    rest = [random.randint(0, n * 10) for _ in range(n - k)]
-    data = sorted_part + rest
-    random.shuffle(data)
-    return data
+    if not 0.0 <= sorted_ratio <= 1.0:
+        raise ValueError("sorted_ratio must be between 0 and 1.")
+    if n <= 0:
+        return []
+    values = random.sample(range(n * 10 + 1), k=n)
+    values.sort()
+    if n == 1 or sorted_ratio >= 1.0:
+        return values
+    shuffle_count = max(1, int(n * (1.0 - sorted_ratio)))
+    indices = random.sample(range(n), k=shuffle_count)
+    subset = [values[i] for i in indices]
+    random.shuffle(subset)
+    for idx, val in zip(indices, subset):
+        values[idx] = val
+    if all(values[i] <= values[i + 1] for i in range(n - 1)):
+        if values[0] != values[-1]:
+            values[0], values[-1] = values[-1], values[0]
+    return values
 
 
 def reverse_sorted_array(n: int) -> List[int]:

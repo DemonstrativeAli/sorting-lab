@@ -37,11 +37,11 @@ class CompareWorker(QtCore.QObject):
         try:
             records: list[dict[str, object]] = []
             total = len(self.algos)
+            base_data = data_gen.generate(self.dataset, self.size)
             for idx, algo_key in enumerate(self.algos, start=1):
                 if self._stop:
                     self.canceled.emit()
                     return
-                base_data = data_gen.generate(self.dataset, self.size)
                 durations: list[float] = []
                 mems: list[float] = []
                 mem_peaks: list[float] = []
@@ -205,11 +205,12 @@ class CompareView(QtWidgets.QWidget):
         body = QtWidgets.QHBoxLayout()
         body.setSpacing(12)
         body.addWidget(self._build_form_card(), 1)
-        body.addWidget(self._build_result_card(), 2)
+        body.addWidget(self._build_result_card(), 3)
         self.layout().addLayout(body)
 
     def _build_form_card(self) -> QtWidgets.QFrame:
         card = self._card()
+        card.setMaximumWidth(320)
         form = QtWidgets.QFormLayout(card)
         form.setVerticalSpacing(10)
         form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
@@ -221,7 +222,7 @@ class CompareView(QtWidgets.QWidget):
             item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
             item.setCheckState(QtCore.Qt.Checked)
             self.algo_list.addItem(item)
-        self.algo_list.setMinimumWidth(240)
+        self.algo_list.setMinimumWidth(210)
         self.algo_list.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.algo_list.setWordWrap(True)
         self.algo_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
@@ -655,7 +656,10 @@ class CompareView(QtWidgets.QWidget):
         ax.set_title("Detaylı Performans Karşılaştırması", fontsize=12, color="#f4f7ff", pad=12, fontweight='bold')
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=20, ha='right', fontsize=10)
-        ax.legend(loc='upper left', fontsize=9, framealpha=0.4, facecolor='#0c1324', edgecolor='#223156')
+        legend = ax.legend(loc='upper left', fontsize=9, framealpha=0.4, facecolor='#0c1324', edgecolor='#223156')
+        for text in legend.get_texts():
+            text.set_color("#f4f7ff")
+        legend.get_title().set_color("#f4f7ff")
         ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=1)
         ax.grid(axis="x", alpha=0.1, linestyle="--", linewidth=0.5)
         ax.set_ylim(0, 1.1)
