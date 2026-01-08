@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import List
+import math
 
 from PySide6 import QtWidgets, QtCore, QtGui
 import pandas as pd
@@ -87,7 +88,10 @@ class CompareView(QtWidgets.QWidget):
         self._animation = None
         self._chart_data = None
         self._current_chart_index = 0
-        self._animation_interval_ms = 16
+        self._animation_fps = 60
+        self._animation_duration_s = 2.0
+        self._animation_interval_ms = max(1, int(1000 / self._animation_fps))
+        self._detail_window = None
         self._apply_theme()
         self.setLayout(QtWidgets.QVBoxLayout())
         self.layout().setContentsMargins(10, 10, 10, 10)
@@ -199,7 +203,44 @@ class CompareView(QtWidgets.QWidget):
         text_box.addWidget(subtitle)
         header.addLayout(text_box)
         header.addStretch()
+        self.detail_btn = QtWidgets.QPushButton("Detaylı Karşılaştırma")
+        self.detail_btn.clicked.connect(self._open_detail_compare)
+        header.addWidget(self.detail_btn)
         self.layout().addLayout(header)
+
+    def _start_worker(self, worker: QtCore.QObject) -> None:
+        thread = QtCore.QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_progress)
+        worker.finished.connect(self._on_worker_finished)
+        worker.canceled.connect(self._on_worker_canceled)
+        worker.error.connect(self._on_worker_error)
+        for sig in (worker.finished, worker.canceled, worker.error):
+            sig.connect(thread.quit)
+        thread.finished.connect(lambda w=worker, t=thread: self._on_thread_finished(w, t))
+        self._worker = worker
+        self._thread = thread
+        thread.start()
+
+    def _open_detail_compare(self) -> None:
+        if self._detail_window is not None:
+            self._detail_window.raise_()
+            self._detail_window.activateWindow()
+            return
+        from sorting_lab.gui.screens.detail_compare import DetailCompareView
+
+        window = QtWidgets.QMainWindow()
+        window.setWindowTitle("Detaylı Karşılaştırma")
+        window.resize(1100, 700)
+        window.setCentralWidget(DetailCompareView())
+        window.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        window.destroyed.connect(self._clear_detail_window)
+        self._detail_window = window
+        window.show()
+
+    def _clear_detail_window(self, *_args: object) -> None:
+        self._detail_window = None
 
     def _build_body(self) -> None:
         body = QtWidgets.QHBoxLayout()
@@ -506,20 +547,7 @@ class CompareView(QtWidgets.QWidget):
         self.stop_btn.setEnabled(True)
         QtWidgets.QApplication.processEvents()
 
-        self._worker = CompareWorker(algos, size, dataset, runs)
-        self._thread = QtCore.QThread(self)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.progress.connect(self._on_progress)
-        self._worker.finished.connect(self._on_worker_finished)
-        self._worker.canceled.connect(self._on_worker_canceled)
-        self._worker.error.connect(self._on_worker_error)
-
-        for sig in (self._worker.finished, self._worker.canceled, self._worker.error):
-            sig.connect(self._thread.quit)
-            sig.connect(self._worker.deleteLater)
-        self._thread.finished.connect(self._thread.deleteLater)
-        self._thread.start()
+        self._start_worker(CompareWorker(algos, size, dataset, runs))
 
     def _pulse_status(self) -> None:
         effect = QtWidgets.QGraphicsOpacityEffect()
@@ -705,12 +733,10 @@ class CompareView(QtWidgets.QWidget):
                 ax.set_title(title, fontsize=13, color="#f4f7ff", pad=15, fontweight='bold')
                 ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=1)
                 ax.grid(axis="x", alpha=0.1, linestyle="--", linewidth=0.5)
+                total_frames = max(1, int(self._animation_fps * self._animation_duration_s))
                 
                 def animate_line(frame):
                     try:
-                        total_frames = len(x) * 3
-                        if frame >= total_frames:
-                            return self._line_plot, self._line_scatter
                         progress = min(1.0, (frame + 1) / total_frames)
                         idx = max(1, int(progress * len(x)))
                         if idx > 0:
@@ -718,103 +744,78 @@ class CompareView(QtWidgets.QWidget):
                             y_data = y[:idx]
                             self._line_plot.set_data(x_data, y_data)
                             if len(x_data) > 0:
-                                scatter_data = np.array(list(zip(x_data, y_data)))
-                                self._line_scatter.set_offsets(scatter_data)
-                                if len(colors[:idx]) > 0:
-                                    # Renkleri normalize et
-                                    try:
-                                        color_array = np.linspace(0, 1, len(colors[:idx]))
-                                        self._line_scatter.set_array(color_array)
-                                        self._line_scatter.set_cmap(plt.cm.viridis)
-                                    except:
-                                        pass
-                                # Fill area - önceki fill'i kaldır
-                                if self._line_fill_poly is not None:
-                                    try:
-                                        for poly in self._line_fill_poly:
-                                            poly.remove()
-                                    except:
-                                        pass
-                                if len(x_data) > 1:
-                                    self._line_fill_poly = ax.fill_between(x_data, 0, y_data, color="#3ac7ff", alpha=0.2)
-                            # Eksenleri güncelle
-                            ax.set_ylabel(ylabel, fontsize=12, color="#d8e4ff", fontweight='bold')
-                            ax.set_title(title, fontsize=13, color="#f4f7ff", pad=15, fontweight='bold')
-                            ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=1)
-                            ax.grid(axis="x", alpha=0.1, linestyle="--", linewidth=0.5)
-                        self.canvas.draw_idle()
-                        return self._line_plot, self._line_scatter
+                                self._line_scatter.set_offsets(list(zip(x_data, y_data)))
+                                self._line_scatter.set_color(colors[:idx])
+                                if idx == len(x) and self._line_fill_poly is None and len(x_data) > 1:
+                                    self._line_fill_poly = ax.fill_between(
+                                        x_data, 0, y_data, color="#3ac7ff", alpha=0.2
+                                    )
+                        artists = [self._line_plot, self._line_scatter]
+                        if self._line_fill_poly is not None:
+                            artists.append(self._line_fill_poly)
+                        return artists
                     except Exception as e:
                         # Hata olsa bile devam et
-                        return self._line_plot, self._line_scatter
+                        return [self._line_plot, self._line_scatter]
                 
                 self._animation = FuncAnimation(
-                    self.canvas.figure, animate_line, frames=len(x) * 3, 
-                    interval=self._animation_interval_ms, blit=False, repeat=False
+                    self.canvas.figure, animate_line, frames=total_frames,
+                    interval=self._animation_interval_ms, blit=True, repeat=False
                 )
                 # Figure arka plan rengini ayarla
                 self.canvas.figure.set_facecolor("#0c1324")
             else:
                 self._bar_data = {"y": y, "labels": labels, "colors": colors}
-                self._bars = []
-                ax.set_xticks(range(len(labels)))
-                ax.set_xticklabels(labels, rotation=15, ha='right')
+                x = list(range(len(labels)))
+                ax.set_xticks(x)
+                ax.set_xticklabels(labels, rotation=20, ha='right')
                 y_max = max(y) if y else 0
-                y_max = y_max * 1.15 if y_max > 0 else 1
+                y_max = y_max * 1.2 if y_max > 0 else 1
                 ax.set_ylim(0, y_max)
                 ax.set_xlim(-0.5, len(labels) - 0.5)
+                ax.set_ylabel(ylabel, fontsize=12, color="#d8e4ff", fontweight='bold')
+                ax.set_title(title, fontsize=13, color="#f4f7ff", pad=15, fontweight='bold')
+                ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=1)
+                ax.grid(axis="x", alpha=0.1, linestyle="--", linewidth=0.5)
+                bars = ax.bar(x, [0.0] * len(y), color=colors, alpha=0.9, edgecolor='white', linewidth=2)
+                self._bars = list(bars)
+                value_labels = []
+                for bar in bars:
+                    label = ax.text(
+                        bar.get_x() + bar.get_width() / 2.0,
+                        0,
+                        "",
+                        ha='center',
+                        va='bottom',
+                        fontsize=10,
+                        color='#f4f7ff',
+                        weight='bold',
+                    )
+                    label.set_visible(False)
+                    value_labels.append(label)
+                total_frames = max(1, int(self._animation_fps * self._animation_duration_s))
                 
                 def animate_bar(frame):
                     try:
-                        total_frames = len(labels) * 15
-                        if frame >= total_frames:
-                            return self._bars
-                        
-                        # Her çubuk için ayrı animasyon
-                        ax.clear()
-                        self._apply_chart_style(ax)
-                        
-                        bars = []
-                        for i in range(len(labels)):
-                            # Her çubuk için animasyon ilerlemesi
-                            bar_start_frame = i * 12
-                            bar_anim_frames = 20
-                            if frame >= bar_start_frame:
-                                anim_progress = min(1.0, (frame - bar_start_frame) / bar_anim_frames)
-                                # Daha yumuşak easing function (ease-out cubic)
-                                anim_progress = 1 - (1 - anim_progress) ** 2.5
-                                target_height = y[i] * anim_progress
-                                bar = ax.bar(i, target_height, color=colors[i], alpha=0.85 + 0.1 * anim_progress, 
-                                            edgecolor='white', linewidth=2)
-                                bars.extend(bar)
-                                # Değer etiketi
-                                if anim_progress > 0.8:
-                                    ax.text(i, target_height, f'{y[i]:.4f}' if y[i] < 1 else f'{y[i]:.2f}',
-                                           ha='center', va='bottom', fontsize=10, color='#f4f7ff', weight='bold')
+                        progress = min(1.0, (frame + 1) / total_frames)
+                        for bar, val, label in zip(bars, y, value_labels):
+                            height = val * progress
+                            bar.set_height(height)
+                            if progress >= 0.9:
+                                label.set_text(f'{val:.4f}' if val < 1 else f'{val:.2f}')
+                                label.set_x(bar.get_x() + bar.get_width() / 2.0)
+                                label.set_y(height)
+                                label.set_visible(True)
                             else:
-                                bar = ax.bar(i, 0, color=colors[i], alpha=0.0)
-                                bars.extend(bar)
-                        
-                        ax.set_xticks(range(len(labels)))
-                        ax.set_xticklabels(labels, rotation=20, ha='right', fontsize=10)
-                        y_max = max(y) if y else 0
-                        y_max = y_max * 1.2 if y_max > 0 else 1
-                        ax.set_ylim(0, y_max)
-                        ax.set_xlim(-0.5, len(labels) - 0.5)
-                        ax.set_ylabel(ylabel, fontsize=12, color="#d8e4ff", fontweight='bold')
-                        ax.set_title(title, fontsize=13, color="#f4f7ff", pad=15, fontweight='bold')
-                        ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=1)
-                        ax.grid(axis="x", alpha=0.1, linestyle="--", linewidth=0.5)
-                        self._bars = bars
-                        self.canvas.draw_idle()
-                        return self._bars
+                                label.set_visible(False)
+                        return [*bars, *value_labels]
                     except Exception as e:
                         # Hata olsa bile devam et
                         return self._bars if hasattr(self, '_bars') else []
                 
                 self._animation = FuncAnimation(
-                    self.canvas.figure, animate_bar, frames=len(labels) * 15, 
-                    interval=self._animation_interval_ms, blit=False, repeat=False
+                    self.canvas.figure, animate_bar, frames=total_frames,
+                    interval=self._animation_interval_ms, blit=True, repeat=False
                 )
                 # Figure arka plan rengini ayarla
                 self.canvas.figure.set_facecolor("#0c1324")
@@ -961,8 +962,15 @@ class CompareView(QtWidgets.QWidget):
         self.progress.hide()
         self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self._worker = None
-        self._thread = None
+
+    def _on_thread_finished(self, worker: QtCore.QObject, thread: QtCore.QThread) -> None:
+        worker.moveToThread(QtCore.QCoreApplication.instance().thread())
+        worker.deleteLater()
+        thread.deleteLater()
+        if self._worker is worker:
+            self._worker = None
+        if self._thread is thread:
+            self._thread = None
 
     def _on_stop(self) -> None:
         if self._worker is not None:
@@ -1000,10 +1008,15 @@ class CompareView(QtWidgets.QWidget):
             return [0.0] * len(df)
         values: list[float] = []
         for val in df[key]:
-            if val is None:
+            try:
+                num = float(val)
+            except (TypeError, ValueError):
+                values.append(0.0)
+                continue
+            if not math.isfinite(num):
                 values.append(0.0)
             else:
-                values.append(max(0.0, float(val)))
+                values.append(max(0.0, num))
         return values
 
     def _render_memory_chart(self, ax, df, key: str, title: str, ylabel: str) -> None:
